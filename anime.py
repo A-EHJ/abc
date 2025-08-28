@@ -1,17 +1,16 @@
 import re
 import json
 import time
-import functools
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Tuple
-from urllib.parse import urljoin, urlencode, urlparse, parse_qs
+from urllib.parse import urljoin, urlencode
 
 import requests
 from bs4 import BeautifulSoup
 import streamlit as st
 from streamlit.components.v1 import html as st_html
 
-# Opcional: persistencia en localStorage (si no está instalado, se usa fallback en sesión)
+# Persistencia opcional en localStorage. Si no está disponible, usa fallback en sesión.
 try:
     from streamlit_js_eval import get_local_storage, set_local_storage  # pip install streamlit-js-eval
 except Exception:  # pragma: no cover
@@ -20,7 +19,6 @@ except Exception:  # pragma: no cover
 
 BASE_URL = "https://www3.animeflv.net"
 LS_KEY = "aflv_nav_seen_v1"   # clave en localStorage
-
 
 # ---------------- Estado de filtros (Directorio) ----------------
 def _dir_defaults():
@@ -66,7 +64,7 @@ def extract_episode_servers(html: str):
     {lang, server, title, ads, allow_mobile, link}
     Prioriza 'url' y si no existe usa 'code'.
     """
-    m = re.search(r'var\s+videos\s*=\s*(\{.*?\});', html, re.DOTALL)
+    m = re.search(r'var\s+videos\s*=\s*(\{.*?});', html, re.DOTALL)
     if not m:
         return []
     raw = m.group(1)
@@ -161,7 +159,7 @@ def parse_anime_detail(html: str, page_url: str, base_url: str) -> AnimeDetail:
     desc_tag = soup.select_one(".Description") or soup.find("p")
     description = desc_tag.get_text(" ", strip=True) if desc_tag else ""
     episodes: List[Episode] = []
-    m = re.search(r"var\s+episodes\s*=\s*(\[\[.*?\]\]);", html, re.S)
+    m = re.search(r"var\s+episodes\s*=\s*(\[\[.*?]]);", html, re.S)
     slug = None
     ms = re.search(
         r'var\s+anime_info\s*=\s*\[\s*"[^\"]*",\s*"[^\"]*",\s*"([^\"]+)"', html
@@ -183,7 +181,7 @@ def parse_anime_detail(html: str, page_url: str, base_url: str) -> AnimeDetail:
 
 # --------- HOME: “de la semana / últimos episodios” ---------
 def _clean_home_title(text: str) -> str:
-    """Remueve prefijos/sufijos 'Episodio N' del texto recibido."""
+    """Remueve prefijos/sufijos 'Episodio N' del texto recibido y normaliza espacios."""
     if not text:
         return text
     t = re.sub(r'^\s*Episodio\s*\d+\s*[-:–—]?\s*', '', text, flags=re.I)
@@ -238,7 +236,7 @@ ORDER_MAP  = {
     "default": "Por Defecto",
     "updated": "Recientemente Actualizados",
     "added":  "Recientemente Agregados",
-    "name":   "Nombre A-Z",
+    "name":   "Nombre A-Z",     # (el sitio acepta 'name' para ordenar por título)
     "rating": "Calificación",
 }
 YEARS = list(range(1990, 2026))
@@ -337,14 +335,13 @@ def view_home():
     for i, it in enumerate(items):
         with cols[i % 4]:
             if it.image:
-                # reemplazo de use_container_width → width
-                st.image(it.image, width=300)
+                st.image(it.image, width=300)  # sin use_container_width
             st.caption(f"{it.anime_title} — Episodio {it.episode_num}")
             c1, c2 = st.columns(2)
-            if c1.button("Ver episodios", key=f"h_go_{i}"):
+            if c1.button("Ver episodios", key=f"h_go_{i}", help="Ir a la ficha del anime"):
                 st.session_state.update({"mode": "detail", "anime_url": it.anime_url})
                 st.rerun()
-            if c2.button("Ver capítulo ▸", key=f"h_ep_{i}"):
+            if c2.button("Ver capítulo ▸", key=f"h_ep_{i}", help="Abrir el episodio en el visor"):
                 st.session_state.update({"mode": "episode", "episode_url": it.episode_url, "player_url": None})
                 st.rerun()
 
@@ -393,7 +390,7 @@ def view_browse():
                 if c.image:
                     st.image(c.image, width=160)
                 st.caption(c.title or "")
-                if st.button("Ver", key=f"ver_{i}"):
+                if st.button("Ver", key=f"ver_{i}", help="Abrir ficha del anime"):
                     st.session_state.update({"mode": "detail", "anime_url": c.url})
                     st.rerun()
 
@@ -506,6 +503,7 @@ def view_episode(ep_url: str):
                 key=f"play_{idx}",
                 on_click=lambda url=s.get('link',''): st.session_state.update({"player_url": url}),
                 disabled=not s.get("link"),
+                help="Cargar este servidor en el visor"
             )
             st.divider()
 
@@ -541,6 +539,7 @@ def view_anime(url: str):
                     st.session_state["mode"] = "episode"
                     st.session_state["episode_url"] = ep.url
                     st.session_state["player_url"] = None
+                    # marcar como visto también aquí (por si no abre el visor)
                     m = re.search(r"/ver/([a-z0-9\-]+)-(\d+)", ep.url, re.I)
                     if m:
                         slug = m.group(1)
@@ -560,6 +559,7 @@ def view_seen():
         st.info("Aún no hay animes/episodios vistos.")
         return
 
+    # ordenar por último visto desc
     items = sorted(animes.items(), key=lambda kv: kv[1].get("last_seen", 0), reverse=True)
     for slug, a in items:
         title = a.get("title") or slug.replace("-", " ").title()
@@ -570,12 +570,14 @@ def view_seen():
             if image:
                 st.image(image, width=220)
             st.markdown(f"[Ver ficha del anime]({url})")
+            # lista de episodios
             ep_items = sorted(((int(k), v) for k, v in eps.items()), key=lambda x: x[0], reverse=True)
             cols = st.columns(4)
             for i, (num, info) in enumerate(ep_items):
                 with cols[i % 4]:
                     st.write(f"Episodio {num}")
                     st.link_button("Abrir", info.get("url", "#"))
+            # borrar anime del historial
             st.button("Quitar de vistos", key=f"del_{slug}", on_click=lambda s=slug: seen_delete_anime(s))
 
     st.divider()
