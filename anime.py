@@ -1,6 +1,7 @@
 import re
 import json
 import time
+import functools
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Tuple
 from urllib.parse import urljoin, urlencode
@@ -19,6 +20,7 @@ except Exception:  # pragma: no cover
 
 BASE_URL = "https://www3.animeflv.net"
 LS_KEY = "aflv_nav_seen_v1"   # clave en localStorage
+
 
 # ---------------- Estado de filtros (Directorio) ----------------
 def _dir_defaults():
@@ -302,8 +304,8 @@ def seen_add_episode(slug: str, title: str, anime_url: str, ep_num: int, ep_url:
     data = _ls_load()
     animes = data.setdefault("animes", {})
     a = animes.setdefault(slug, {"title": title, "url": anime_url, "image": image, "episodes": {}, "last_seen": 0})
-    a["title"] = a.get("title") or title
-    a["url"] = anime_url
+    a["title"] = title or a.get("title")
+    a["url"] = anime_url or a.get("url")
     if image:
         a["image"] = image
     ts = int(time.time())
@@ -320,6 +322,33 @@ def seen_delete_anime(slug: str):
 def seen_clear_all():
     _ls_save({"animes": {}})
     st.rerun()
+
+
+# ---------------- Utilidades de episodios (prev/next) ----------------
+@functools.lru_cache(maxsize=256)
+def get_anime_detail_cached(slug: str) -> AnimeDetail:
+    """Descarga y cachea la ficha del anime para cálculos de navegación y metadatos."""
+    html = fetch(abs_url(BASE_URL, f"/anime/{slug}"))
+    return parse_anime_detail(html, abs_url(BASE_URL, f"/anime/{slug}"), BASE_URL)
+
+def get_prev_next_urls(slug: str, current_num: int) -> Tuple[Optional[str], Optional[str], Optional[AnimeDetail]]:
+    """Devuelve (prev_url, next_url, detail) para el episodio actual."""
+    try:
+        detail = get_anime_detail_cached(slug)
+    except Exception:
+        return None, None, None
+    num_to_url = {e.number: e.url for e in detail.episodes if e.url}
+    if not num_to_url:
+        return None, None, detail
+    nums = sorted(num_to_url.keys())
+    if current_num not in num_to_url and nums:
+        # Si el número no está (caso raro), ubicamos posición relativa
+        nums.append(current_num)
+        nums = sorted(set(nums))
+    idx = nums.index(current_num)
+    prev_url = num_to_url.get(nums[idx-1]) if idx > 0 else None
+    next_url = num_to_url.get(nums[idx+1]) if idx < len(nums)-1 else None
+    return prev_url, next_url, detail
 
 
 # ---------------- Vistas ----------------
@@ -413,9 +442,15 @@ def view_browse():
 
 
 def view_episode(ep_url: str):
-    # Marcar como visto (extraer slug y número del URL)
+    # Marcar como visto + preparar navegación
     m = re.search(r"/ver/([a-z0-9\-]+)-(\d+)", ep_url, re.I)
     slug, ep_num = (m.group(1), int(m.group(2))) if m else (None, None)
+
+    # Obtener info del anime + prev/next
+    detail_for_seen: Optional[AnimeDetail] = None
+    prev_url = next_url = None
+    if slug and ep_num is not None:
+        prev_url, next_url, detail_for_seen = get_prev_next_urls(slug, ep_num)
 
     with st.spinner("Cargando episodio…"):
         html_page = fetch(ep_url)
@@ -424,17 +459,13 @@ def view_episode(ep_url: str):
     # Título
     title_match = re.search(r"<h1[^>]*>(.*?)</h1>", html_page, re.S)
     title_text = BeautifulSoup(title_match.group(1), "html.parser").get_text(" ", strip=True) if title_match else ep_url
-    # Intentar deducir título de anime
-    anime_title = None
-    m2 = re.search(r"(.+?)\s+Episodio\s+\d+", title_text, re.I)
-    if m2:
-        anime_title = m2.group(1).strip()
 
-    # Marcar visto (si pudimos deducir datos)
+    # Marcar visto (usando metadatos reales si los tenemos)
     if slug and ep_num is not None:
-        seen_add_episode(slug, anime_title or slug.replace("-", " ").title(),
-                         abs_url(BASE_URL, f"/anime/{slug}"),
-                         ep_num, ep_url, image=None)
+        title_for_seen = (detail_for_seen.title if detail_for_seen else slug.replace("-", " ").title())
+        image_for_seen = (detail_for_seen.image if detail_for_seen else None)
+        seen_add_episode(slug, title_for_seen, abs_url(BASE_URL, f"/anime/{slug}"),
+                         ep_num, ep_url, image=image_for_seen)
 
     # autoselección: primer servidor con link
     if servers and not st.session_state.get("player_url"):
@@ -443,7 +474,15 @@ def view_episode(ep_url: str):
                 st.session_state["player_url"] = s["link"]
                 break
 
-    st.button("Volver al anime", on_click=lambda: st.session_state.update({"mode": "detail"}))
+    # Controles superiores
+    c1, c2, c3 = st.columns([1, 1, 1])
+    with c1:
+        st.button("◂ Anterior", disabled=not prev_url, on_click=lambda url=prev_url: _go_episode(url), help="Episodio anterior")
+    with c2:
+        st.button("Volver al anime", on_click=lambda: st.session_state.update({"mode": "detail"}))
+    with c3:
+        st.button("Siguiente ▸", disabled=not next_url, on_click=lambda url=next_url: _go_episode(url), help="Próximo episodio")
+
     st.subheader(title_text)
 
     # Reproductor
@@ -486,26 +525,36 @@ def view_episode(ep_url: str):
     st.markdown("### Servidores")
     if not servers:
         st.info("No se encontraron servidores para este episodio.")
-        return
+    else:
+        col_a, col_b = st.columns(2)
+        cols = [col_a, col_b]
+        for idx, s in enumerate(servers):
+            with cols[idx % 2]:
+                badge = "🟡 con ads" if s.get("ads") else "🟢 sin ads"
+                st.markdown(
+                    f"**{s.get('title','')}** (`{s.get('server','')}`) — {badge}  \n"
+                    f"[Abrir enlace ↗]({s.get('link','')})",
+                    unsafe_allow_html=False,
+                )
+                st.button(
+                    "Ver aquí",
+                    key=f"play_{idx}",
+                    on_click=lambda url=s.get('link',''): st.session_state.update({"player_url": url}),
+                    disabled=not s.get("link"),
+                    help="Cargar este servidor en el visor"
+                )
+                st.divider()
 
-    col_a, col_b = st.columns(2)
-    cols = [col_a, col_b]
-    for idx, s in enumerate(servers):
-        with cols[idx % 2]:
-            badge = "🟡 con ads" if s.get("ads") else "🟢 sin ads"
-            st.markdown(
-                f"**{s.get('title','')}** (`{s.get('server','')}`) — {badge}  \n"
-                f"[Abrir enlace ↗]({s.get('link','')})",
-                unsafe_allow_html=False,
-            )
-            st.button(
-                "Ver aquí",
-                key=f"play_{idx}",
-                on_click=lambda url=s.get('link',''): st.session_state.update({"player_url": url}),
-                disabled=not s.get("link"),
-                help="Cargar este servidor en el visor"
-            )
-            st.divider()
+    # Botón siguiente al final (cómodo para maratón)
+    st.button("Siguiente ▸", disabled=not next_url, on_click=lambda url=next_url: _go_episode(url), key="next_bottom")
+
+def _go_episode(url: Optional[str]):
+    if not url:
+        return
+    st.session_state["mode"] = "episode"
+    st.session_state["episode_url"] = url
+    st.session_state["player_url"] = None
+    st.rerun()
 
 
 def view_anime(url: str):
@@ -527,6 +576,28 @@ def view_anime(url: str):
             st.write("Géneros: " + ", ".join(detail.genres))
         if detail.description:
             st.write(detail.description)
+
+        # Si hay historial, ofrecer “Continuar”
+        slug_match = re.search(r"/anime/([a-z0-9\-]+)$", url)
+        if slug_match:
+            slug = slug_match.group(1)
+            data = _ls_load()
+            eps_seen = data.get("animes", {}).get(slug, {}).get("episodes", {})
+            if eps_seen:
+                last_seen = max(int(k) for k in eps_seen.keys())
+                # buscar siguiente válido en la ficha
+                next_url = None
+                for e in sorted(detail.episodes, key=lambda e: e.number):
+                    if e.number > last_seen:
+                        next_url = e.url
+                        break
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.write(f"Último visto: **Ep {last_seen}**")
+                with c2:
+                    st.button("Continuar ▸", disabled=not next_url,
+                              on_click=lambda url=next_url: _go_episode(url))
+
     st.markdown("### Lista de episodios")
     if not detail.episodes:
         st.info("No se detectaron episodios.")
@@ -566,10 +637,37 @@ def view_seen():
         image = a.get("image")
         url = a.get("url") or abs_url(BASE_URL, f"/anime/{slug}")
         eps = a.get("episodes", {})
+        last_seen = max((int(k) for k in eps.keys()), default=None)
+
+        # Calcular “continuar”
+        next_url = None
+        try:
+            detail = get_anime_detail_cached(slug)
+            if last_seen is not None:
+                for e in sorted(detail.episodes, key=lambda e: e.number):
+                    if e.number > last_seen and e.url:
+                        next_url = e.url
+                        break
+        except Exception:
+            pass
+
         with st.expander(f"{title} — {len(eps)} episodios vistos"):
             if image:
                 st.image(image, width=220)
             st.markdown(f"[Ver ficha del anime]({url})")
+
+            if last_seen is not None:
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    st.write(f"Último visto: **Ep {last_seen}**")
+                with c2:
+                    first_url = eps.get(str(last_seen), {}).get("url")
+                    if first_url:
+                        st.link_button("Abrir último visto", first_url)
+                with c3:
+                    st.button("Continuar ▸", disabled=not next_url,
+                              on_click=lambda url=next_url: _go_episode(url))
+
             # lista de episodios
             ep_items = sorted(((int(k), v) for k, v in eps.items()), key=lambda x: x[0], reverse=True)
             cols = st.columns(4)
