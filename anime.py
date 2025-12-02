@@ -22,6 +22,120 @@ BASE_URL = "https://www3.animeflv.net"
 LS_KEY = "aflv_nav_seen_v1"   # clave en localStorage
 
 
+# ---------------- Navegación interna (historial + atajos) ----------------
+NAV_STATE_KEYS = ["mode", "anime_url", "episode_url", "player_url", "player_h"]
+
+
+def _ensure_nav_stacks():
+    st.session_state.setdefault("nav_history", [])  # pila para atrás
+    st.session_state.setdefault("nav_future", [])   # pila para adelante
+
+
+def _current_nav_state() -> Dict:
+    return {k: st.session_state.get(k) for k in NAV_STATE_KEYS}
+
+
+def _apply_nav_state(state: Dict):
+    st.session_state.update({k: state.get(k) for k in NAV_STATE_KEYS})
+
+
+def _navigate_to(mode: str, **kwargs):
+    """Actualiza el modo guardando el estado anterior para un botón Atrás/Adelante."""
+    _ensure_nav_stacks()
+    st.session_state["nav_loading"] = True
+    st.session_state["nav_history"].append(_current_nav_state())
+    st.session_state["nav_future"].clear()
+    new_state = _current_nav_state()
+    new_state.update(kwargs)
+    new_state["mode"] = mode
+    if mode != "episode":
+        new_state["player_url"] = None
+    _apply_nav_state(new_state)
+    st.rerun()
+
+
+def _nav_back():
+    _ensure_nav_stacks()
+    if not st.session_state["nav_history"]:
+        return
+    st.session_state["nav_loading"] = True
+    st.session_state["nav_future"].append(_current_nav_state())
+    prev = st.session_state["nav_history"].pop()
+    _apply_nav_state(prev)
+    st.rerun()
+
+
+def _nav_forward():
+    _ensure_nav_stacks()
+    if not st.session_state["nav_future"]:
+        return
+    st.session_state["nav_loading"] = True
+    st.session_state["nav_history"].append(_current_nav_state())
+    nxt = st.session_state["nav_future"].pop()
+    _apply_nav_state(nxt)
+    st.rerun()
+
+
+def _consume_nav_param():
+    """Permite que la URL ?nav=back|forward active los controles de historial."""
+    params = st.experimental_get_query_params()
+    action = None
+    if "nav" in params and params["nav"]:
+        action = params["nav"][0]
+        params.pop("nav", None)
+        st.experimental_set_query_params(**params)
+    if action == "back":
+        _nav_back()
+    elif action == "forward":
+        _nav_forward()
+
+
+def _inject_nav_shortcuts():
+    """JS para interceptar botón atrás del navegador y atajos de teclado (←/→)."""
+    if st.session_state.get("_nav_js_injected"):
+        return
+    st.session_state["_nav_js_injected"] = True
+    st_html(
+        """
+        <script>
+        (function() {
+            const sendNav = (action) => {
+                const url = new URL(window.location.href);
+                url.searchParams.set('nav', action);
+                window.location.replace(url.toString());
+            };
+            // Atajos de teclado
+            document.addEventListener('keydown', (ev) => {
+                if (ev.key === 'ArrowLeft') { sendNav('back'); }
+                else if (ev.key === 'ArrowRight') { sendNav('forward'); }
+            }, { passive: true });
+            // Evita salir del sitio con el botón atrás del navegador
+            window.history.pushState({}, '', window.location.href);
+            window.addEventListener('popstate', () => sendNav('back'));
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+
+def _show_global_css():
+    """Oculta controles de Streamlit (Stop/Fork) y ajusta algunos estilos sutiles."""
+    if st.session_state.get("_css_injected"):
+        return
+    st.session_state["_css_injected"] = True
+    st.markdown(
+        """
+        <style>
+        [data-testid="stToolbar"], .stApp [title*="Stop"], .stApp [title*="Fork"] { display: none !important; }
+        /* Mejora la legibilidad de botones compactos */
+        button[kind="secondary"] { line-height: 1.2em; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 # ---------------- Estado de filtros (Directorio) ----------------
 def _dir_defaults():
     return {
@@ -368,11 +482,9 @@ def view_home():
             st.caption(f"{it.anime_title} — Episodio {it.episode_num}")
             c1, c2 = st.columns(2)
             if c1.button("Ver episodios", key=f"h_go_{i}", help="Ir a la ficha del anime"):
-                st.session_state.update({"mode": "detail", "anime_url": it.anime_url})
-                st.rerun()
+                _navigate_to("detail", anime_url=it.anime_url)
             if c2.button("Ver capítulo ▸", key=f"h_ep_{i}", help="Abrir el episodio en el visor"):
-                st.session_state.update({"mode": "episode", "episode_url": it.episode_url, "player_url": None})
-                st.rerun()
+                _navigate_to("episode", episode_url=it.episode_url, player_url=None)
 
 
 def view_browse():
@@ -380,7 +492,18 @@ def view_browse():
 
     # --- Búsqueda por título en la página ---
     st.header("Directorio")
-    st.text_input("Buscar por título", key="dir_q", placeholder="Escribe y presiona Enter")
+    def _trigger_search():
+        st.session_state["dir_page"] = 1
+        st.rerun()
+
+    st.text_input(
+        "Buscar por título",
+        key="dir_q",
+        placeholder="Escribe para filtrar o pulsa el botón",
+        on_change=_trigger_search,
+        help="El filtrado se aplica automáticamente al escribir o con el botón Buscar.",
+    )
+    st.button("🔍 Buscar", on_click=_trigger_search)
 
     # --- Filtros en la IZQUIERDA (sidebar) ---
     with st.sidebar:
@@ -420,8 +543,7 @@ def view_browse():
                     st.image(c.image, width=160)
                 st.caption(c.title or "")
                 if st.button("Ver", key=f"ver_{i}", help="Abrir ficha del anime"):
-                    st.session_state.update({"mode": "detail", "anime_url": c.url})
-                    st.rerun()
+                    _navigate_to("detail", anime_url=c.url)
 
     # --- Paginación segura (callbacks) ---
     def _prev_page():
@@ -478,8 +600,13 @@ def view_episode(ep_url: str):
     c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
         st.button("◂ Anterior", disabled=not prev_url, on_click=lambda url=prev_url: _go_episode(url), help="Episodio anterior")
+    target_anime_url = abs_url(BASE_URL, f"/anime/{slug}") if slug else st.session_state.get("anime_url")
     with c2:
-        st.button("Volver al anime", on_click=lambda: st.session_state.update({"mode": "detail"}))
+        st.button(
+            "Volver al anime",
+            disabled=not target_anime_url,
+            on_click=lambda: _navigate_to("detail", anime_url=target_anime_url),
+        )
     with c3:
         st.button("Siguiente ▸", disabled=not next_url, on_click=lambda url=next_url: _go_episode(url), help="Próximo episodio")
 
@@ -487,8 +614,14 @@ def view_episode(ep_url: str):
 
     # Reproductor
     st.write("### Reproductor")
-    h = st.slider("Altura del reproductor", min_value=320, max_value=900, step=20,
-                  value=st.session_state.get("player_h", 540))
+    h = st.slider(
+        "Altura del reproductor",
+        min_value=320,
+        max_value=900,
+        step=20,
+        value=st.session_state.get("player_h", 540),
+        help="Ajusta la altura del iframe. Si ves 'Sandboxed embed is not allowed', prueba otro servidor o usa Abrir en pestaña nueva.",
+    )
     st.session_state["player_h"] = h
 
     player_url = st.session_state.get("player_url")
@@ -517,6 +650,9 @@ def view_episode(ep_url: str):
             f"<a href='{player_url}' target='_blank' rel='noopener'>Abrir en pestaña nueva ↗</a>"
             f"</div>",
             unsafe_allow_html=True,
+        )
+        st.info(
+            "Si el visor muestra mensajes como 'Sandboxed embed is not allowed' o la página del servidor se cae, abre el enlace directo o prueba otro servidor de la lista."
         )
     else:
         st.info("Elige un servidor para reproducir.")
@@ -551,10 +687,7 @@ def view_episode(ep_url: str):
 def _go_episode(url: Optional[str]):
     if not url:
         return
-    st.session_state["mode"] = "episode"
-    st.session_state["episode_url"] = url
-    st.session_state["player_url"] = None
-    st.rerun()
+    _navigate_to("episode", episode_url=url, player_url=None)
 
 
 def view_anime(url: str):
@@ -564,7 +697,7 @@ def view_anime(url: str):
 
     st.button(
         "Volver al Directorio",
-        on_click=lambda: st.session_state.update({"mode": "browse", "anime_url": None}),
+        on_click=lambda: _navigate_to("browse", anime_url=None),
     )
     cols = st.columns([1, 3])
     with cols[0]:
@@ -607,9 +740,7 @@ def view_anime(url: str):
             cols[0].write(f"Episodio {ep.number}")
             if ep.url:
                 if cols[1].button("Ver en visor", key=f"ep_{ep.number}"):
-                    st.session_state["mode"] = "episode"
-                    st.session_state["episode_url"] = ep.url
-                    st.session_state["player_url"] = None
+                    _navigate_to("episode", episode_url=ep.url, player_url=None)
                     # marcar como visto también aquí (por si no abre el visor)
                     m = re.search(r"/ver/([a-z0-9\-]+)-(\d+)", ep.url, re.I)
                     if m:
@@ -685,6 +816,8 @@ def view_seen():
 # ---------------- App ----------------
 def main():
     st.set_page_config(page_title="AnimeFLV Navigator", layout="wide")
+    _inject_nav_shortcuts()
+    _show_global_css()
     st.sidebar.title("AnimeFLV Navigator")
 
     # Estado inicial
@@ -698,15 +831,25 @@ def main():
                 "player_h": 540,
             }
         )
+    _ensure_nav_stacks()
+    _consume_nav_param()
+
+    if st.session_state.pop("nav_loading", False):
+        st.info("Abriendo contenido…")
 
     # Navegación lateral
+    st.sidebar.caption("Usa ←/→ o estos controles para moverte sin salir de la app")
+    back_col, next_col = st.sidebar.columns(2)
+    back_col.button("⬅️ Atrás", on_click=_nav_back, disabled=not st.session_state.get("nav_history"))
+    next_col.button("Adelante ➡️", on_click=_nav_forward, disabled=not st.session_state.get("nav_future"))
+
     col_nav1, col_nav2, col_nav3 = st.sidebar.columns(3)
     if col_nav1.button("Inicio"):
-        st.session_state["mode"] = "home";  st.rerun()
+        _navigate_to("home")
     if col_nav2.button("Directorio"):
-        st.session_state["mode"] = "browse"; st.rerun()
+        _navigate_to("browse")
     if col_nav3.button("Vistos"):
-        st.session_state["mode"] = "seen";   st.rerun()
+        _navigate_to("seen")
 
     mode = st.session_state.get("mode", "home")
     if mode == "detail" and st.session_state.get("anime_url"):
