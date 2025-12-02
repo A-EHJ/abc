@@ -42,7 +42,6 @@ def _apply_nav_state(state: Dict):
 def _navigate_to(mode: str, **kwargs):
     """Actualiza el modo guardando el estado anterior para un botón Atrás/Adelante."""
     _ensure_nav_stacks()
-    st.session_state["nav_loading"] = True
     st.session_state["nav_history"].append(_current_nav_state())
     st.session_state["nav_future"].clear()
     new_state = _current_nav_state()
@@ -58,7 +57,6 @@ def _nav_back():
     _ensure_nav_stacks()
     if not st.session_state["nav_history"]:
         return
-    st.session_state["nav_loading"] = True
     st.session_state["nav_future"].append(_current_nav_state())
     prev = st.session_state["nav_history"].pop()
     _apply_nav_state(prev)
@@ -69,7 +67,6 @@ def _nav_forward():
     _ensure_nav_stacks()
     if not st.session_state["nav_future"]:
         return
-    st.session_state["nav_loading"] = True
     st.session_state["nav_history"].append(_current_nav_state())
     nxt = st.session_state["nav_future"].pop()
     _apply_nav_state(nxt)
@@ -116,23 +113,6 @@ def _inject_nav_shortcuts():
         </script>
         """,
         height=0,
-    )
-
-
-def _show_global_css():
-    """Oculta controles de Streamlit (Stop/Fork) y ajusta algunos estilos sutiles."""
-    if st.session_state.get("_css_injected"):
-        return
-    st.session_state["_css_injected"] = True
-    st.markdown(
-        """
-        <style>
-        [data-testid="stToolbar"], .stApp [title*="Stop"], .stApp [title*="Fork"] { display: none !important; }
-        /* Mejora la legibilidad de botones compactos */
-        button[kind="secondary"] { line-height: 1.2em; }
-        </style>
-        """,
-        unsafe_allow_html=True,
     )
 
 
@@ -817,7 +797,6 @@ def view_seen():
 def main():
     st.set_page_config(page_title="AnimeFLV Navigator", layout="wide")
     _inject_nav_shortcuts()
-    _show_global_css()
     st.sidebar.title("AnimeFLV Navigator")
 
     # Estado inicial
@@ -833,9 +812,6 @@ def main():
         )
     _ensure_nav_stacks()
     _consume_nav_param()
-
-    if st.session_state.pop("nav_loading", False):
-        st.info("Abriendo contenido…")
 
     # Navegación lateral
     st.sidebar.caption("Usa ←/→ o estos controles para moverte sin salir de la app")
