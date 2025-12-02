@@ -472,7 +472,18 @@ def view_browse():
 
     # --- Búsqueda por título en la página ---
     st.header("Directorio")
-    st.text_input("Buscar por título", key="dir_q", placeholder="Escribe y presiona Enter")
+    def _trigger_search():
+        st.session_state["dir_page"] = 1
+        st.rerun()
+
+    st.text_input(
+        "Buscar por título",
+        key="dir_q",
+        placeholder="Escribe para filtrar o pulsa el botón",
+        on_change=_trigger_search,
+        help="El filtrado se aplica automáticamente al escribir o con el botón Buscar.",
+    )
+    st.button("🔍 Buscar", on_click=_trigger_search)
 
     # --- Filtros en la IZQUIERDA (sidebar) ---
     with st.sidebar:
@@ -583,8 +594,14 @@ def view_episode(ep_url: str):
 
     # Reproductor
     st.write("### Reproductor")
-    h = st.slider("Altura del reproductor", min_value=320, max_value=900, step=20,
-                  value=st.session_state.get("player_h", 540))
+    h = st.slider(
+        "Altura del reproductor",
+        min_value=320,
+        max_value=900,
+        step=20,
+        value=st.session_state.get("player_h", 540),
+        help="Ajusta la altura del iframe. Si ves 'Sandboxed embed is not allowed', prueba otro servidor o usa Abrir en pestaña nueva.",
+    )
     st.session_state["player_h"] = h
 
     player_url = st.session_state.get("player_url")
@@ -613,6 +630,9 @@ def view_episode(ep_url: str):
             f"<a href='{player_url}' target='_blank' rel='noopener'>Abrir en pestaña nueva ↗</a>"
             f"</div>",
             unsafe_allow_html=True,
+        )
+        st.info(
+            "Si el visor muestra mensajes como 'Sandboxed embed is not allowed' o la página del servidor se cae, abre el enlace directo o prueba otro servidor de la lista."
         )
     else:
         st.info("Elige un servidor para reproducir.")
