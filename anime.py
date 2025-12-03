@@ -380,6 +380,12 @@ def _ls_load() -> Dict:
         data = {}
     if "animes" not in data:
         data["animes"] = {}
+    # Normalizar episodios antiguos que no tengan bandera de confirmación
+    for a in data.get("animes", {}).values():
+        eps = a.get("episodes", {})
+        for num, info in eps.items():
+            if isinstance(info, dict):
+                info.setdefault("confirmed", False)
     st.session_state["seen_cache"] = data
     return data
 
@@ -394,17 +400,44 @@ def _ls_save(data: Dict):
     else:
         st.session_state["_ls_fallback"] = raw
 
-def seen_add_episode(slug: str, title: str, anime_url: str, ep_num: int, ep_url: str, image: Optional[str] = None):
+def seen_add_episode(
+    slug: str,
+    title: str,
+    anime_url: str,
+    ep_num: int,
+    ep_url: str,
+    image: Optional[str] = None,
+    confirmed: bool = False,
+):
     data = _ls_load()
     animes = data.setdefault("animes", {})
-    a = animes.setdefault(slug, {"title": title, "url": anime_url, "image": image, "episodes": {}, "last_seen": 0})
+    a = animes.setdefault(
+        slug, {"title": title, "url": anime_url, "image": image, "episodes": {}, "last_seen": 0}
+    )
     a["title"] = title or a.get("title")
     a["url"] = anime_url or a.get("url")
     if image:
         a["image"] = image
     ts = int(time.time())
     a["last_seen"] = ts
-    a["episodes"][str(ep_num)] = {"url": ep_url, "ts": ts}
+    ep_entry = a["episodes"].get(str(ep_num), {})
+    ep_entry.update({"url": ep_url, "ts": ts})
+    ep_entry["confirmed"] = confirmed or ep_entry.get("confirmed", False)
+    a["episodes"][str(ep_num)] = ep_entry
+    _ls_save(data)
+
+
+def seen_confirm_episode(slug: str, ep_num: int):
+    data = _ls_load()
+    anime = data.get("animes", {}).get(slug)
+    if not anime:
+        return
+    ep_entry = anime.get("episodes", {}).get(str(ep_num))
+    if not ep_entry:
+        return
+    ep_entry["confirmed"] = True
+    ep_entry["ts"] = int(time.time())
+    anime["last_seen"] = max(anime.get("last_seen", 0), ep_entry["ts"])
     _ls_save(data)
 
 def seen_delete_anime(slug: str):
@@ -566,8 +599,15 @@ def view_episode(ep_url: str):
     if slug and ep_num is not None:
         title_for_seen = (detail_for_seen.title if detail_for_seen else slug.replace("-", " ").title())
         image_for_seen = (detail_for_seen.image if detail_for_seen else None)
-        seen_add_episode(slug, title_for_seen, abs_url(BASE_URL, f"/anime/{slug}"),
-                         ep_num, ep_url, image=image_for_seen)
+        seen_add_episode(
+            slug,
+            title_for_seen,
+            abs_url(BASE_URL, f"/anime/{slug}"),
+            ep_num,
+            ep_url,
+            image=image_for_seen,
+            confirmed=False,
+        )
 
     # autoselección: primer servidor con link
     if servers and not st.session_state.get("player_url"):
@@ -591,6 +631,19 @@ def view_episode(ep_url: str):
         st.button("Siguiente ▸", disabled=not next_url, on_click=lambda url=next_url: _go_episode(url), help="Próximo episodio")
 
     st.subheader(title_text)
+
+    # Estado de visto + reconfirmación manual
+    seen_info = _ls_load().get("animes", {}).get(slug or "", {}).get("episodes", {})
+    current_seen = seen_info.get(str(ep_num), {}) if ep_num is not None else {}
+    status = "✅ Confirmado" if current_seen.get("confirmed") else "👁️ Marcado (falta confirmar)"
+    st.caption(status)
+    if slug and ep_num is not None:
+        st.button(
+            "Confirmar que ya lo viste",
+            disabled=current_seen.get("confirmed", False),
+            on_click=lambda s=slug, n=ep_num: (seen_confirm_episode(s, n), st.rerun()),
+            help="Úsalo para reafirmar que terminaste el episodio.",
+        )
 
     # Reproductor
     st.write("### Reproductor")
@@ -675,6 +728,11 @@ def view_anime(url: str):
         html = fetch(url)
     detail = parse_anime_detail(html, url, BASE_URL)
 
+    seen_data = _ls_load()
+    slug_match = re.search(r"/anime/([a-z0-9\-]+)$", url)
+    slug = slug_match.group(1) if slug_match else None
+    seen_eps = seen_data.get("animes", {}).get(slug or "", {}).get("episodes", {})
+
     st.button(
         "Volver al Directorio",
         on_click=lambda: _navigate_to("browse", anime_url=None),
@@ -691,44 +749,57 @@ def view_anime(url: str):
             st.write(detail.description)
 
         # Si hay historial, ofrecer “Continuar”
-        slug_match = re.search(r"/anime/([a-z0-9\-]+)$", url)
-        if slug_match:
-            slug = slug_match.group(1)
-            data = _ls_load()
-            eps_seen = data.get("animes", {}).get(slug, {}).get("episodes", {})
-            if eps_seen:
-                last_seen = max(int(k) for k in eps_seen.keys())
-                # buscar siguiente válido en la ficha
-                next_url = None
-                for e in sorted(detail.episodes, key=lambda e: e.number):
-                    if e.number > last_seen:
-                        next_url = e.url
-                        break
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.write(f"Último visto: **Ep {last_seen}**")
-                with c2:
-                    st.button("Continuar ▸", disabled=not next_url,
-                              on_click=lambda url=next_url: _go_episode(url))
+        if slug and seen_eps:
+            last_seen = max(int(k) for k in seen_eps.keys())
+            # buscar siguiente válido en la ficha
+            next_url = None
+            for e in sorted(detail.episodes, key=lambda e: e.number):
+                if e.number > last_seen:
+                    next_url = e.url
+                    break
+            c1, c2 = st.columns(2)
+            with c1:
+                st.write(f"Último visto: **Ep {last_seen}**")
+            with c2:
+                st.button("Continuar ▸", disabled=not next_url,
+                          on_click=lambda url=next_url: _go_episode(url))
 
     st.markdown("### Lista de episodios")
     if not detail.episodes:
         st.info("No se detectaron episodios.")
     else:
         for ep in sorted(detail.episodes, key=lambda e: e.number, reverse=True):
-            cols = st.columns([2, 1, 1])
+            cols = st.columns([2, 1, 1, 1])
             cols[0].write(f"Episodio {ep.number}")
+            ep_seen = seen_eps.get(str(ep.number), {}) if slug else {}
+            if ep_seen:
+                badge = "✅ Confirmado" if ep_seen.get("confirmed") else "👁️ Marcado"
+                cols[0].caption(badge)
             if ep.url:
                 if cols[1].button("Ver en visor", key=f"ep_{ep.number}"):
                     _navigate_to("episode", episode_url=ep.url, player_url=None)
                     # marcar como visto también aquí (por si no abre el visor)
                     m = re.search(r"/ver/([a-z0-9\-]+)-(\d+)", ep.url, re.I)
-                    if m:
-                        slug = m.group(1)
-                        seen_add_episode(slug, detail.title, abs_url(BASE_URL, f"/anime/{slug}"),
-                                         ep.number, ep.url, image=detail.image)
+                    slug_for_seen = m.group(1) if m else slug
+                    if slug_for_seen:
+                        seen_add_episode(
+                            slug_for_seen,
+                            detail.title,
+                            abs_url(BASE_URL, f"/anime/{slug_for_seen}"),
+                            ep.number,
+                            ep.url,
+                            image=detail.image,
+                            confirmed=False,
+                        )
                     st.rerun()
                 cols[2].link_button("Abrir directo ↗", ep.url)
+                cols[3].button(
+                    "Confirmar visto",
+                    key=f"confirm_{ep.number}",
+                    disabled=not slug or ep_seen.get("confirmed", False),
+                    on_click=lambda s=slug, n=ep.number: (seen_confirm_episode(s, n), st.rerun()),
+                    help="Pulsa para marcar manualmente que terminaste el episodio.",
+                )
             else:
                 cols[1].write("-")
 
@@ -785,7 +856,16 @@ def view_seen():
             for i, (num, info) in enumerate(ep_items):
                 with cols[i % 4]:
                     st.write(f"Episodio {num}")
+                    status = "✅ Confirmado" if info.get("confirmed") else "👁️ Marcado"
+                    st.caption(status)
                     st.link_button("Abrir", info.get("url", "#"))
+                    st.button(
+                        "Reconfirmar",
+                        key=f"reconfirm_{slug}_{num}",
+                        disabled=info.get("confirmed", False),
+                        on_click=lambda s=slug, n=num: (seen_confirm_episode(s, n), st.rerun()),
+                        help="Marca manualmente que terminaste este episodio.",
+                    )
             # borrar anime del historial
             st.button("Quitar de vistos", key=f"del_{slug}", on_click=lambda s=slug: seen_delete_anime(s))
 
