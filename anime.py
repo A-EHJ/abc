@@ -847,7 +847,12 @@ def view_seen():
         except Exception:
             pass
 
-        with st.expander(f"{title} — {len(eps)} episodios vistos"):
+        confirmed_count = sum(1 for _, info in eps.items() if info.get("confirmed"))
+        pending_count = len(eps) - confirmed_count
+
+        with st.expander(
+            f"{title} — {len(eps)} episodios vistos — {confirmed_count} confirmados / {pending_count} pendientes"
+        ):
             if image:
                 st.image(image, width=220)
             st.markdown(f"[Ver ficha del anime]({url})")
@@ -865,27 +870,39 @@ def view_seen():
                               on_click=lambda url=next_url: _go_episode(url))
 
             # lista de episodios
-            ep_items = sorted(((int(k), v) for k, v in eps.items()), key=lambda x: x[0], reverse=True)
-            cols = st.columns(4)
-            for i, (num, info) in enumerate(ep_items):
-                with cols[i % 4]:
-                    st.write(f"Episodio {num}")
-                    status = "✅ Confirmado" if info.get("confirmed") else "👁️ Marcado"
-                    st.caption(status)
-                    st.link_button("Abrir", info.get("url", "#"))
-                    st.button(
-                        "Reconfirmar",
-                        key=f"reconfirm_{slug}_{num}",
-                        disabled=info.get("confirmed", False),
-                        on_click=lambda s=slug, n=num: (seen_confirm_episode(s, n), st.rerun()),
-                        help="Marca manualmente que terminaste este episodio.",
-                    )
-                    st.button(
-                        "Quitar",
-                        key=f"remove_{slug}_{num}",
-                        on_click=lambda s=slug, n=num: (seen_remove_episode(s, n), st.rerun()),
-                        help="Elimina este episodio de la lista de vistos.",
-                    )
+            ep_items = sorted(
+                ((int(k), v) for k, v in eps.items()), key=lambda x: x[0], reverse=True
+            )
+
+            def render_section(title: str, items: List[Tuple[int, Dict]], confirmed: bool):
+                st.markdown(f"#### {title}")
+                if not items:
+                    st.caption("No hay episodios en esta sección.")
+                    return
+
+                cols = st.columns(4)
+                for i, (num, info) in enumerate(items):
+                    with cols[i % 4]:
+                        st.write(f"Episodio {num}")
+                        status = "✅ Confirmado" if confirmed else "⏳ Pendiente"
+                        st.caption(status)
+                        st.link_button("Abrir", info.get("url", "#"))
+                        st.button(
+                            "Reconfirmar",
+                            key=f"reconfirm_{slug}_{num}",
+                            disabled=info.get("confirmed", False),
+                            on_click=lambda s=slug, n=num: (
+                                seen_confirm_episode(s, n),
+                                st.rerun(),
+                            ),
+                            help="Marca manualmente que terminaste este episodio.",
+                        )
+
+            pending_items = [(n, info) for n, info in ep_items if not info.get("confirmed")]
+            confirmed_items = [(n, info) for n, info in ep_items if info.get("confirmed")]
+
+            render_section("Pendientes", pending_items, confirmed=False)
+            render_section("Confirmados", confirmed_items, confirmed=True)
             # borrar anime del historial
             st.button("Quitar de vistos", key=f"del_{slug}", on_click=lambda s=slug: seen_delete_anime(s))
 
