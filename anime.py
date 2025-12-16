@@ -440,6 +440,20 @@ def seen_confirm_episode(slug: str, ep_num: int):
     anime["last_seen"] = max(anime.get("last_seen", 0), ep_entry["ts"])
     _ls_save(data)
 
+
+def seen_remove_episode(slug: str, ep_num: int):
+    data = _ls_load()
+    anime = data.get("animes", {}).get(slug)
+    if not anime:
+        return
+    episodes = anime.get("episodes", {})
+    removed = episodes.pop(str(ep_num), None)
+    if not removed:
+        return
+    remaining_ts = max((ep.get("ts", 0) for ep in episodes.values()), default=0)
+    anime["last_seen"] = remaining_ts
+    _ls_save(data)
+
 def seen_delete_anime(slug: str):
     data = _ls_load()
     data.get("animes", {}).pop(slug, None)
@@ -865,6 +879,12 @@ def view_seen():
                         disabled=info.get("confirmed", False),
                         on_click=lambda s=slug, n=num: (seen_confirm_episode(s, n), st.rerun()),
                         help="Marca manualmente que terminaste este episodio.",
+                    )
+                    st.button(
+                        "Quitar",
+                        key=f"remove_{slug}_{num}",
+                        on_click=lambda s=slug, n=num: (seen_remove_episode(s, n), st.rerun()),
+                        help="Elimina este episodio de la lista de vistos.",
                     )
             # borrar anime del historial
             st.button("Quitar de vistos", key=f"del_{slug}", on_click=lambda s=slug: seen_delete_anime(s))
