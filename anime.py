@@ -440,6 +440,20 @@ def seen_confirm_episode(slug: str, ep_num: int):
     anime["last_seen"] = max(anime.get("last_seen", 0), ep_entry["ts"])
     _ls_save(data)
 
+
+def seen_remove_episode(slug: str, ep_num: int):
+    data = _ls_load()
+    anime = data.get("animes", {}).get(slug)
+    if not anime:
+        return
+    episodes = anime.get("episodes", {})
+    removed = episodes.pop(str(ep_num), None)
+    if not removed:
+        return
+    remaining_ts = max((ep.get("ts", 0) for ep in episodes.values()), default=0)
+    anime["last_seen"] = remaining_ts
+    _ls_save(data)
+
 def seen_delete_anime(slug: str):
     data = _ls_load()
     data.get("animes", {}).pop(slug, None)
@@ -814,6 +828,14 @@ def view_seen():
 
     # ordenar por último visto desc
     items = sorted(animes.items(), key=lambda kv: kv[1].get("last_seen", 0), reverse=True)
+
+    def badge(text: str, color: str) -> str:
+        return (
+            f"<span style='display:inline-block; padding:2px 8px; border-radius:12px; "
+            f"background:{color}; color:white; font-size:0.85em; margin-right:6px;'>"
+            f"{text}</span>"
+        )
+
     for slug, a in items:
         title = a.get("title") or slug.replace("-", " ").title()
         image = a.get("image")
@@ -836,12 +858,13 @@ def view_seen():
         confirmed_count = sum(1 for _, info in eps.items() if info.get("confirmed"))
         pending_count = len(eps) - confirmed_count
 
-        header_label = (
-            f"{title} — {len(eps)} episodios vistos — ✅ {confirmed_count} confirmados / "
-            f"⏳ {pending_count} pendientes"
-        )
-
+        header_label = f"{title} — {len(eps)} episodios vistos"
         with st.expander(header_label):
+            st.markdown(
+                badge(f"✅ {confirmed_count} confirmados", "#1f7a1f")
+                + badge(f"⏳ {pending_count} pendientes", "#b36a00"),
+                unsafe_allow_html=True,
+            )
             if image:
                 st.image(image, width=220)
             st.markdown(f"[Ver ficha del anime]({url})")
@@ -890,12 +913,12 @@ def view_seen():
                         ),
                         help="Marca manualmente que terminaste este episodio.",
                     )
-
-            pending_items = [(n, info) for n, info in ep_items if not info.get("confirmed")]
-            confirmed_items = [(n, info) for n, info in ep_items if info.get("confirmed")]
-
-            render_section("Pendientes", pending_items, confirmed=False)
-            render_section("Confirmados", confirmed_items, confirmed=True)
+                    st.button(
+                        "Quitar",
+                        key=f"remove_{slug}_{num}",
+                        on_click=lambda s=slug, n=num: (seen_remove_episode(s, n), st.rerun()),
+                        help="Elimina este episodio de la lista de vistos.",
+                    )
             # borrar anime del historial
             st.button("Quitar de vistos", key=f"del_{slug}", on_click=lambda s=slug: seen_delete_anime(s))
 
