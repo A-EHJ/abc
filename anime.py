@@ -828,6 +828,14 @@ def view_seen():
 
     # ordenar por último visto desc
     items = sorted(animes.items(), key=lambda kv: kv[1].get("last_seen", 0), reverse=True)
+
+    def badge(text: str, color: str) -> str:
+        return (
+            f"<span style='display:inline-block; padding:2px 8px; border-radius:12px; "
+            f"background:{color}; color:white; font-size:0.85em; margin-right:6px;'>"
+            f"{text}</span>"
+        )
+
     for slug, a in items:
         title = a.get("title") or slug.replace("-", " ").title()
         image = a.get("image")
@@ -847,7 +855,16 @@ def view_seen():
         except Exception:
             pass
 
-        with st.expander(f"{title} — {len(eps)} episodios vistos"):
+        confirmed_count = sum(1 for _, info in eps.items() if info.get("confirmed"))
+        pending_count = len(eps) - confirmed_count
+
+        header_label = f"{title} — {len(eps)} episodios vistos"
+        with st.expander(header_label):
+            st.markdown(
+                badge(f"✅ {confirmed_count} confirmados", "#1f7a1f")
+                + badge(f"⏳ {pending_count} pendientes", "#b36a00"),
+                unsafe_allow_html=True,
+            )
             if image:
                 st.image(image, width=220)
             st.markdown(f"[Ver ficha del anime]({url})")
