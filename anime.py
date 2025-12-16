@@ -882,19 +882,35 @@ def view_seen():
                               on_click=lambda url=next_url: _go_episode(url))
 
             # lista de episodios
-            ep_items = sorted(((int(k), v) for k, v in eps.items()), key=lambda x: x[0], reverse=True)
-            cols = st.columns(4)
-            for i, (num, info) in enumerate(ep_items):
-                with cols[i % 4]:
-                    st.write(f"Episodio {num}")
-                    status = "✅ Confirmado" if info.get("confirmed") else "👁️ Marcado"
-                    st.caption(status)
-                    st.link_button("Abrir", info.get("url", "#"))
-                    st.button(
+            ep_items = sorted(
+                ((int(k), v) for k, v in eps.items()), key=lambda x: x[0], reverse=True
+            )
+
+            def render_section(title: str, items: List[Tuple[int, Dict]], confirmed: bool):
+                st.markdown(f"#### {title}")
+                if not items:
+                    st.caption("No hay episodios en esta sección.")
+                    return
+
+                for num, info in items:
+                    row = st.columns([2, 1, 1])
+                    status = "✅ Confirmado" if confirmed else "⏳ Pendiente"
+                    badge_color = "green" if confirmed else "orange"
+                    row[0].markdown(
+                        f"**Episodio {num}**  "
+                        f"<span style='background:{badge_color};color:white;padding:0.15em 0.5em;border-radius:999px;font-size:0.8em;'>"
+                        f"{status}</span>",
+                        unsafe_allow_html=True,
+                    )
+                    row[1].link_button("Abrir", info.get("url", "#"))
+                    row[2].button(
                         "Reconfirmar",
                         key=f"reconfirm_{slug}_{num}",
                         disabled=info.get("confirmed", False),
-                        on_click=lambda s=slug, n=num: (seen_confirm_episode(s, n), st.rerun()),
+                        on_click=lambda s=slug, n=num: (
+                            seen_confirm_episode(s, n),
+                            st.rerun(),
+                        ),
                         help="Marca manualmente que terminaste este episodio.",
                     )
                     st.button(
